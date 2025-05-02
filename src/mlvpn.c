@@ -92,6 +92,7 @@ int logdebug = 0;
 
 static uint64_t data_seq = 0;
 static uint32_t max_buffered_packets = 32768;
+static volatile uint32_t running_tunnels = 0;
 
 struct mlvpn_status_s mlvpn_status = {
     .start_time = 0,
@@ -330,7 +331,7 @@ mlvpn_rtun_recv_data(mlvpn_tunnel_t *tun, mlvpn_pkt_t *inpkt)
 {
     int ret;
     uint32_t drained;
-    if (reorder_buffer == NULL || !inpkt->reorder) {
+    if (reorder_buffer == NULL || !inpkt->reorder || running_tunnels <= 1) {
         mlvpn_rtun_inject_tuntap(inpkt);
         return 1;
     } else {
@@ -1384,14 +1385,14 @@ mlvpn_rtun_adjust_reorder_timeout(EV_P_ ev_timer *w, int revents)
     /* Update the reorder algorithm */
     if (max_srtt > 0) {
         // Apply a factor to the srtt in order to get a window
-        max_srtt *= 2.2;
-		//double timeout = fmax(max_srtt / 1000.0, 0.016);
+        //max_srtt *= 1.5;
+		//double timeout = fmin(max_srtt / 1000.0, 0.016);
 		double timeout = max_srtt / 1000.0;
         log_info("reorder", "adjusting reordering drain timeout to %fs", timeout);
         reorder_drain_timeout.repeat = timeout;
     } else {
-        log_info("reorder", "adjusting reordering drain timeout to 0.8s");
-        reorder_drain_timeout.repeat = 0.8; /* Conservative 800ms shot */
+        log_info("reorder", "adjusting reordering drain timeout to 0.100s");
+        reorder_drain_timeout.repeat = 0.100; /* Conservative 100ms shot */
     }
 }
 
@@ -1436,15 +1437,20 @@ update_process_title()
     memset(title, 0, sizeof(title));
     if (*process_title)
         strlcat(title, process_title, sizeof(title));
+    uint32_t running = 0;
     LIST_FOREACH(t, &rtuns, entries)
     {
         switch(t->status) {
             case MLVPN_AUTHOK:
                 s = "@";
+                if(!t->fallback_only)
+                    running++;
                 break;
             case MLVPN_HIGH_LATENCY:
             case MLVPN_LOSSY:
                 s = "~";
+                if(!t->fallback_only)
+                    running++;
                 break;
             default:
                 s = "!";
@@ -1456,7 +1462,8 @@ update_process_title()
             strlcat(title, status, sizeof(title));
         }
     }
-    setproctitle("%s", title);
+    running_tunnels = running;
+    setproctitle("%s (%u)", title, running_tunnels);
 }
 
 static void
